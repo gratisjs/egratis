@@ -5,40 +5,60 @@ const mysql = require('mysql2/promise'); // Usamos la versión con Promises para
 const cors = require('cors'); // Para permitir peticiones desde tu frontend
 
 const app = express();
-// La siguiente línea ha sido modificada para ser compatible con entornos de hosting como Hostinger
-const port = process.env.PORT || 3000; // El puerto donde correrá tu API
+// El puerto donde correrá tu API. Render inyectará su propio puerto en process.env.PORT
+const port = process.env.PORT || 3000; 
 
-// Middleware para habilitar CORS (Cross-Origin Resource Sharing)
-app.use(cors());
+// --- CONFIGURACIÓN DE CORS (Cross-Origin Resource Sharing) ---
+// Esto es VITAL cuando tu frontend y backend están en dominios diferentes.
+// Permite que tu frontend haga peticiones a tu API.
+// Asegúrate de que la URL de 'origin' sea EXACTA a la URL de tu frontend en Hostinger.
+const corsOptions = {
+    origin: 'https://blue-dunlin-336418.hostingersite.com' // ¡ESTA ES LA URL DE TU FRONTEND!
+};
+app.use(cors(corsOptions));
+// -------------------------------------------------------------
 
 // Middleware para parsear el cuerpo de las peticiones JSON (necesario para POST, PUT, DELETE)
 app.use(express.json());
 
-// Configuración de la conexión a tu base de datos
+// --- CONFIGURACIÓN DE LA CONEXIÓN A TU BASE DE DATOS MySQL ---
+// ¡¡IMPORTANTE!! Las credenciales se leerán de las variables de entorno de Render.
+// NO codifiques tus credenciales de base de datos directamente aquí en producción.
 const dbConfig = {
-    host: 'localhost',         // O la IP de tu servidor de base de datos
-    user: 'root',              // Tu usuario de MySQL
-    password: '',              // ¡¡IMPORTANTE: AQUÍ DEBES PONER TU CONTRASEÑA REAL DE MYSQL!!
-    database: 'sector7'        // EL NOMBRE DE TU BASE DE DATOS
+    host: process.env.DB_HOST,         // Variable de entorno de Render
+    user: process.env.DB_USER,         // Variable de entorno de Render
+    password: process.env.DB_PASSWORD, // Variable de entorno de Render
+    database: process.env.DB_NAME      // Variable de entorno de Render
 };
 
-let dbPool; // Usaremos un pool de conexiones para mayor eficiencia
+let dbPool; // Usaremos un pool de conexiones para mayor eficiencia y rendimiento
 
 // Función para crear un pool de conexiones a la base de datos
 async function createDatabasePool() {
     try {
         const pool = mysql.createPool(dbConfig); // Crea un pool de conexiones
+        // Intentar una conexión para verificar que las credenciales son correctas
+        const connection = await pool.getConnection();
+        connection.release(); // Liberar la conexión inmediatamente
         console.log('Pool de conexiones a la base de datos creado correctamente.');
         return pool;
     } catch (error) {
-        console.error('Error al crear el pool de conexiones:', error);
-        process.exit(1); // Sale de la aplicación si no puede crear el pool
+        console.error('Error al crear el pool de conexiones:', error.message);
+        console.error('Verifique las variables de entorno de la base de datos en Render (DB_HOST, DB_USER, DB_PASSWORD, DB_NAME).');
+        console.error('Asegúrese de que la base de datos MySQL en Hostinger esté accesible desde Render y que las credenciales sean correctas.');
+        throw error; // Lanzar el error para que la aplicación no intente iniciar sin DB
     }
 }
 
 // Inicializar el pool al inicio de la aplicación
 (async () => {
-    dbPool = await createDatabasePool();
+    try {
+        dbPool = await createDatabasePool();
+    } catch (error) {
+        // Si el pool no se pudo crear, registramos el error pero permitimos que Express siga escuchando.
+        // Las rutas de la API que necesiten DB fallarán si dbPool es null/undefined.
+        console.error('La aplicación no pudo conectar a la base de datos al inicio. Las rutas de la API que dependan de la DB fallarán.');
+    }
 })();
 
 
@@ -46,25 +66,36 @@ async function createDatabasePool() {
 // RUTAS DE LA API (Endpoints para EXTRAER DATOS - GET)
 // ----------------------------------------------------------------
 
+// Middleware para verificar la conexión a la base de datos en cada ruta
+async function checkDbConnection(req, res, next) {
+    if (!dbPool) {
+        console.error('Error: dbPool no inicializado. La base de datos no está conectada.');
+        return res.status(503).json({ message: 'Servicio no disponible: la base de datos no está conectada.' });
+    }
+    next();
+}
+
+// Aplicar el middleware de verificación de DB a todas las rutas que la necesiten
+app.use(checkDbConnection); // Esto aplicará a TODAS las rutas definidas después de esta línea
+
 // Ruta para obtener todos los profesores
 app.get('/profesores', async (req, res) => {
-    let connection; // Declarar connection aquí para que esté disponible en el finally
+    let connection;
     try {
-        connection = await dbPool.getConnection(); // Obtener una conexión del pool
+        connection = await dbPool.getConnection();
         const [rows] = await connection.execute('SELECT id, nombre, horas_segun_contrato, estado FROM profesor');
-        res.json(rows); // Envía los datos como JSON
+        res.json(rows);
     } catch (error) {
-        console.error('Error al obtener profesores:', error);
+        console.error('Error al obtener profesores:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener profesores.' });
     } finally {
-        if (connection) connection.release(); // Liberar la conexión de vuelta al pool
+        if (connection) connection.release();
     }
 });
 
 // Ruta para buscar profesores por ID o nombre
-// ¡IMPORTANTE: Esta ruta debe ir ANTES de /profesores/:id para evitar conflictos!
 app.get('/profesores/buscar', async (req, res) => {
-    const searchTerm = req.query.q; // Obtiene el término de búsqueda del query parameter 'q'
+    const searchTerm = req.query.q;
 
     if (!searchTerm) {
         return res.status(400).json({ message: 'El término de búsqueda (q) es requerido.' });
@@ -72,44 +103,43 @@ app.get('/profesores/buscar', async (req, res) => {
 
     let connection;
     try {
-        connection = await dbPool.getConnection(); // Obtener una conexión del pool
-        // Consulta SQL para buscar por ID (exacto) o por nombre (LIKE para coincidencias parciales)
+        connection = await dbPool.getConnection();
         const [rows] = await connection.execute(
             `SELECT id, nombre, horas_segun_contrato, estado FROM profesor
              WHERE id = ? OR nombre LIKE ?`,
-            [searchTerm, `%${searchTerm}%`] // El término de búsqueda para LIKE debe ir envuelto en %
+            [searchTerm, `%${searchTerm}%`]
         );
 
         if (rows.length === 0) {
             return res.status(404).json({ message: 'No se encontraron profesores con ese término de búsqueda.' });
         }
 
-        res.json(rows); // Envía los profesores encontrados como JSON
+        res.json(rows);
     } catch (error) {
-        console.error('Error al buscar profesores:', error);
+        console.error('Error al buscar profesores:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al buscar profesores.' });
     } finally {
-        if (connection) connection.release(); // Liberar la conexión de vuelta al pool
+        if (connection) connection.release();
     }
 });
 
-// Ruta para obtener un profesor por ID (Única definición)
+// Ruta para obtener un profesor por ID
 app.get('/profesores/:id', async (req, res) => {
-    const { id } = req.params; // Captura el ID de la URL
+    const { id } = req.params;
     let connection;
     try {
-        connection = await dbPool.getConnection(); // Obtener una conexión del pool
+        connection = await dbPool.getConnection();
         const [rows] = await connection.execute('SELECT id, nombre, horas_segun_contrato, estado FROM profesor WHERE id = ?', [id]);
         
         if (rows.length === 0) {
             return res.status(404).json({ message: 'Profesor no encontrado.' });
         }
-        res.json(rows[0]); // Envía el primer resultado como JSON
+        res.json(rows[0]);
     } catch (error) {
-        console.error('Error al obtener profesor por ID:', error);
+        console.error('Error al obtener profesor por ID:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener profesor.' });
     } finally {
-        if (connection) connection.release(); // Liberar la conexión de vuelta al pool
+        if (connection) connection.release();
     }
 });
 
@@ -135,14 +165,14 @@ app.get('/asistencias', async (req, res) => {
         const [rows] = await connection.execute(query);
         res.json(rows);
     } catch (error) {
-        console.error('Error al obtener asistencias:', error);
+        console.error('Error al obtener asistencias:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener asistencias.' });
     } finally {
         if (connection) connection.release();
     }
 });
 
-// Ruta para obtener horarios de un profesor específico (si la tienes)
+// Ruta para obtener horarios de un profesor específico
 app.get('/horarios/profesor/:id_profesor', async (req, res) => {
     const { id_profesor } = req.params;
     let connection;
@@ -151,13 +181,12 @@ app.get('/horarios/profesor/:id_profesor', async (req, res) => {
         const [rows] = await connection.execute('SELECT * FROM horario WHERE id_profesor = ? ORDER BY hora_entrada', [id_profesor]);
         res.json(rows);
     } catch (error) {
-        console.error('Error al obtener horarios del profesor:', error);
+        console.error('Error al obtener horarios del profesor:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
     } finally {
         if (connection) connection.release();
     }
 });
-
 
 // Ruta para obtener todos los feriados
 app.get('/feriados', async (req, res) => {
@@ -167,7 +196,7 @@ app.get('/feriados', async (req, res) => {
         const [rows] = await connection.execute('SELECT * FROM feriados ORDER BY fecha ASC');
         res.json(rows);
     } catch (error) {
-        console.error('Error al obtener feriados:', error);
+        console.error('Error al obtener feriados:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener feriados.' });
     } finally {
         if (connection) connection.release();
@@ -198,7 +227,7 @@ app.post('/profesores', async (req, res) => {
         );
         res.status(201).json({ message: 'Profesor insertado con éxito', id: id, affectedRows: result.affectedRows });
     } catch (error) {
-        console.error('Error al insertar profesor:', error);
+        console.error('Error al insertar profesor:', error.message);
         if (error.code === 'ER_DUP_ENTRY') {
              return res.status(409).json({ message: 'Error: El ID del profesor ya existe.', error: error.message });
         }
@@ -227,7 +256,7 @@ app.post('/asistencias', async (req, res) => {
         );
         res.status(201).json({ message: 'Asistencia registrada con éxito', id: id, affectedRows: result.affectedRows });
     } catch (error) {
-        console.error('Error al registrar asistencia:', error);
+        console.error('Error al registrar asistencia:', error.message);
         if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
             return res.status(400).json({ message: 'Error: El ID del profesor no existe.', error: error.message });
         }
@@ -259,7 +288,7 @@ app.post('/feriados', async (req, res) => {
         );
         res.status(201).json({ message: 'Feriado insertado con éxito', id: id, affectedRows: result.affectedRows });
     } catch (error) {
-        console.error('Error al insertar feriado:', error);
+        console.error('Error al insertar feriado:', error.message);
         if (error.code === 'ER_DUP_ENTRY') {
              return res.status(409).json({ message: 'Error: La ID del feriado ya existe.', error: error.message });
         }
@@ -288,7 +317,7 @@ app.post('/horarios', async (req, res) => {
         );
         res.status(201).json({ message: 'Horario insertado con éxito', id: id, affectedRows: result.affectedRows });
     } catch (error) {
-        console.error('Error al insertar horario:', error);
+        console.error('Error al insertar horario:', error.message);
         if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
             return res.status(400).json({ message: 'Error: El ID del profesor no existe.', error: error.message });
         }
@@ -302,7 +331,7 @@ app.post('/horarios', async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// RUTAS PARA ACTUALIZAR (PUT) Y ELIMINAR (DELETE) - Ejemplo (puedes añadir más)
+// RUTAS PARA ACTUALIZAR (PUT) Y ELIMINAR (DELETE)
 // ----------------------------------------------------------------
 
 // Ruta para actualizar un profesor
@@ -328,7 +357,7 @@ app.put('/profesores/:id', async (req, res) => {
         }
         res.json({ message: 'Profesor actualizado con éxito', affectedRows: result.affectedRows });
     } catch (error) {
-        console.error('Error al actualizar profesor:', error);
+        console.error('Error al actualizar profesor:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al actualizar profesor.', error: error.message });
     } finally {
         if (connection) connection.release();
@@ -348,7 +377,7 @@ app.delete('/profesores/:id', async (req, res) => {
         }
         res.json({ message: 'Profesor eliminado con éxito', affectedRows: result.affectedRows });
     } catch (error) {
-        console.error('Error al eliminar profesor:', error);
+        console.error('Error al eliminar profesor:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al eliminar profesor.', error: error.message });
     } finally {
         if (connection) connection.release();
@@ -361,23 +390,9 @@ app.delete('/profesores/:id', async (req, res) => {
 // ----------------------------------------------------------------
 
 app.listen(port, () => {
-    console.log(`API escuchando en http://localhost:${port}`);
-    console.log('\nRutas disponibles para EXTRAER (GET):');
-    console.log(`- http://localhost:${port}/profesores`);
-    console.log(`- http://localhost:${port}/profesores/buscar?q=...`); // Añadida aquí
-    console.log(`- http://localhost:${port}/profesores/:id`);
-    console.log(`- http://localhost:${port}/asistencias`);
-    console.log(`- http://localhost:${port}/horarios/profesor/:id_profesor`);
-    console.log(`- http://localhost:${port}/feriados`);
-    console.log('\nRutas disponibles para INSERTAR (POST):');
-    console.log(`- http://localhost:${port}/profesores`);
-    console.log(`- http://localhost:${port}/asistencias`);
-    console.log(`- http://localhost:${port}/feriados`);
-    console.log(`- http://localhost:${port}/horarios`);
-    console.log('\nRutas disponibles para ACTUALIZAR (PUT):');
-    console.log(`- http://localhost:${port}/profesores/:id`);
-    console.log('\nRutas disponibles para ELIMINAR (DELETE):');
-    console.log(`- http://localhost:${port}/profesores/:id`);
+    console.log(`API escuchando en el puerto ${port}`);
+    console.log(`Para acceder a la API, usa la URL de Render (ej: https://egratis.onrender.com).`);
+    console.log('Rutas disponibles: /profesores, /profesores/buscar, /profesores/:id, /asistencias, etc.');
 });
 
 // Manejo de errores de conexión de la base de datos para cerrar el pool al apagar la aplicación
