@@ -13,7 +13,7 @@ const port = process.env.PORT || 3000;
 // Permite que tu frontend haga peticiones a tu API.
 // Asegúrate de que la URL de 'origin' sea EXACTA a la URL de tu frontend en Hostinger.
 const corsOptions = {
-    origin: 'https://blue-dunlin-336418.hostingersite.com/' // ¡ESTA ES LA URL DE TU FRONTEND!
+    origin: 'https://blue-dunlin-336418.hostingersite.com' // ¡ESTA ES LA URL DE TU FRONTEND!
 };
 app.use(cors(corsOptions));
 // -------------------------------------------------------------
