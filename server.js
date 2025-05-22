@@ -25,10 +25,11 @@ app.use(express.json());
 // ¡¡IMPORTANTE!! Las credenciales se leerán de las variables de entorno de Render.
 // NO codifiques tus credenciales de base de datos directamente aquí en producción.
 const dbConfig = {
-    host: process.env.DB_HOST,         // Variable de entorno de Render
-    user: process.env.DB_USER,         // Variable de entorno de Render
+    host: process.env.DB_DATABASE,         // Variable de entorno de Render
+    user: process.env.DB_HOST,         // Variable de entorno de Render
     password: process.env.DB_PASSWORD, // Variable de entorno de Render
-    database: process.env.DB_NAME      // Variable de entorno de Render
+    database: process.env.DB_PORT 
+     database: process.env.DB_USER // Variable de entorno de Render
 };
 
 let dbPool; // Usaremos un pool de conexiones para mayor eficiencia y rendimiento
